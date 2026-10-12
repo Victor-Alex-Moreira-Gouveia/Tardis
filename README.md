@@ -1,152 +1,125 @@
-# Tardis — Servidor Pessoal & Central de Automação
+# Tardis — servidor pessoal, colaboração e automação
 
-**Descrição:** O projeto consiste em um servidor caseiro para hospedar aplicações web e ferramentas de produtividade e automação, eliminando custos com serviços de Cloud para projetos de pequeno e médio porte.
+O Tardis roda em um Raspberry Pi e reúne Nextcloud, Collabora Online, n8n, PostgreSQL e Nginx. O repositório guarda o código e os procedimentos. Os dados de produção e segredos ficam no Pi, fora do Git.
 
-O hardware base utilizado é um **Raspberry Pi 4 Model B** (8 GB de RAM, CPU de 1,5 GHz). Este servidor recebe o hostname de `tardis-core01`. Caso haja necessidade de expansão futura, bastará replicar a infraestrutura em novos nós.
+## Pastas de produção no Raspberry Pi
 
----
+    /home/vamg/Desktop/services/
+    ├── Tardis-source-2026/  # clone Git e Compose usado pelos containers
+    └── server/              # .env, bancos, arquivos Nextcloud e dados do n8n
 
-## Arquitetura e Ecossistema (Docker Compose)
+As duas pastas são necessárias. Tardis-source-2026 é o checkout que controla os containers. server contém dados persistentes e segredos montados nos containers; não apague, mova ou substitua essa pasta durante uma atualização do Git. O clone antigo Tardis-git foi removido depois de confirmar que estava limpo, no mesmo commit e sem containers usando seus arquivos.
 
-O servidor opera de forma centralizada utilizando uma rede interna Docker (`server_net`) e um **Nginx** atuando como Proxy Reverso na porta `80`. Nenhuma aplicação expõe portas diretamente para o host, exceto o Nginx.
+O Compose em execução usa:
 
-### Serviços Incluídos:
-1. **PostgreSQL (`DB_Server`):** Banco de dados centralizado otimizado para o ecossistema.
-2. **Nextcloud (`nextcloud_app`):** Plataforma de armazenamento e colaboração em nuvem.
-3. **Collabora Online (`collabora_app`):** Suíte de escritório integrada ao Nextcloud para edição de documentos (Word, Excel, PPT) via navegador.
-4. **n8n (`n8n_app`):** Ferramenta de automação de workflows.
-5. **Nginx (`nginx_proxy`):** Ponto de entrada único responsável pelo roteamento baseado em subdomínios.
+    /home/vamg/Desktop/services/Tardis-source-2026/docker-compose.yml
+    /home/vamg/Desktop/services/Tardis-source-2026/tardis-production.override.yml
 
----
+O override real do Pi contém nomes de imagem e volume específicos do host, por isso não é enviado ao GitHub. A cópia semanal guarda esse arquivo e a configuração real do Nginx. O arquivo tardis-production.override.example.yml serve como modelo sem o identificador do volume PostgreSQL.
 
-## Estrutura de Diretórios
+### Dados que precisam permanecer
 
-```text
-.
-├── databases/
-│   └── init_server.sql       # Script executado automaticamente pelo Postgres na 1ª inicialização
-├── postgres_data/            # Volume persistente do Banco de Dados
-├── nextcloud_data/           # Volume persistente dos arquivos do Nextcloud
-├── n8n_data/                 # Volume persistente dos fluxos do n8n
-├── docker-compose.yml        # Orquestração de todos os containers
-├── nginx.conf                # Configuração de rotas e subdomínios do Nginx
-└── .env                      # Variáveis de ambiente sensíveis
-```
+- Nextcloud: server/nextcloud_data em /var/www/html.
+- n8n: server/n8n_data em /home/node/.n8n.
+- PostgreSQL: volume Docker externo montado em /var/lib/postgresql/data; o nome real fica apenas no override local do Pi.
+- server/postgres_data é uma montagem separada em /var/lib/postgresql; ela não é o PGDATA ativo.
+- server/.env, server/databases e os arquivos de produção contêm credenciais ou dados necessários à recuperação.
 
----
+O modelo tardis-production.override.example.yml usa as variáveis TARDIS_SERVER_DIR, TARDIS_REPO_DIR, TAILSCALE_DNS_NAME e POSTGRES_ACTIVE_VOLUME. Defina-as no .env local antes de adaptar o modelo; nunca envie o .env ao GitHub.
 
-## Inicialização do Banco de Dados (`./databases`)
+Confirme os mounts reais com docker inspect antes de qualquer atualização ou recuperação. Não use docker compose down -v, docker volume prune nem remova pastas de dados.
 
-O diretório `./databases` é mapeado diretamente para o mecanismo de inicialização do PostgreSQL (`/docker-entrypoint-initdb.d:ro`). Qualquer arquivo `.sql` colocado nele na primeira execução será processado automaticamente.
+## Acesso pelo Tailscale
 
-Exemplo do script `./databases/init_server.sql`:
+O Tailscale Serve termina HTTPS e encaminha para os serviços locais. O acesso permanece privado aos dispositivos aceitos pelo tailnet; MagicDNS não resolve para dispositivos sem Tailscale.
 
-```sql
-CREATE TABLE server_identity (
-    id SERIAL PRIMARY KEY,
-    server_name VARCHAR(100) NOT NULL,
-    server_uuid UUID DEFAULT gen_random_uuid(),
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
+| Serviço | Endereço |
+| --- | --- |
+| Nextcloud | https://<NOME-MAGICDNS>/ |
+| Collabora | https://<NOME-MAGICDNS>:8443/ |
+| n8n | https://<NOME-MAGICDNS>:8444/ |
 
-INSERT INTO server_identity(server_name)
-VALUES ('Raspberry Pi 4B - Tardis');
+Use HTTPS. Abra documentos pelo Nextcloud; o Collabora conversa com ele pela rede Docker e pode responder apenas OK quando sua raiz é acessada diretamente.
 
-```
----
+## Backup semanal
 
-## Configuração de Variáveis de Ambiente (`.env`)
+O serviço tardis-backup.service é executado pelo timer tardis-backup.timer aos domingos às 03:00, no fuso horário do Pi. Persistent=true permite que o systemd execute o backup perdido quando o Pi voltar a ligar.
 
-Crie um arquivo `.env` na raiz do projeto com base nas credenciais abaixo. **Nunca envie o arquivo `.env` para repositórios públicos.**
+O script de backup:
 
-```env
-# Configurações do Banco de Dados
-DB_USER=root
-DB_PASSWORD=sua_senha_segura_aqui
-DB_DATABASE=tardis_db
+1. exige pelo menos 10 GiB livres no destino;
+2. ativa o modo de manutenção do Nextcloud, se ele ainda não estiver ativo, e para o n8n de forma controlada;
+3. gera um dump customizado do banco tardis_db com PostgreSQL 16;
+4. arquiva todos os dados do Nextcloud e do n8n, as configurações de produção, o .env e um bundle Git;
+5. reinicia os serviços, confere os arquivos compactados e o dump, gera SHA-256 e só então marca a cópia como completa;
+6. conserva as 12 cópias semanais completas mais recentes.
 
-# Gateway de Rede Local
-IP_GATEWAY=192.168.1.1
+As cópias ficam em /var/backups/tardis-weekly/, no mesmo Raspberry Pi. Esse destino atende à decisão atual, mas não protege contra perda do próprio Pi. Um backup válido ainda depende de uma restauração ensaiada; até o primeiro ensaio, considere a recuperação operacional não comprovada.
 
-# Credenciais de Administrador do Nextcloud
-NEXTCLOUD_ADMIN_USER=root
-NEXTCLOUD_ADMIN_PASSWORD=sua_senha_admin_nextcloud
+Comandos de consulta:
 
-# Domínio do Tailscale (Utilizado em Produção)
-TAILSCALE_DOMAIN=tardis-core01.tail1234.ts.net
+    systemctl list-timers tardis-backup.timer
+    systemctl status tardis-backup.timer
+    journalctl -u tardis-backup.service
+    sudo bash -c 'cd /var/backups/tardis-weekly/DIRETORIO_DO_BACKUP && sha256sum -c SHA256SUMS'
+    sudo /home/vamg/Desktop/services/server/restore.sh /var/backups/tardis-weekly/DIRETORIO_DO_BACKUP /var/tmp/tardis-restore-DATA
 
-```
----
+O arquivo COMPLETE.txt só aparece depois da verificação de integridade. Uma pasta sem esse marcador é uma execução incompleta e não deve ser usada como recuperação.
 
-## Modos de Operação e Teste
+### Ativar as mensagens no Slack
 
-### 1. Ambiente de Testes Locais (Fedora / Sem Tailscale)
+O canal privado #tardis-backups já foi criado. O timer pode fazer cópias sem uma URL do Slack, mas ainda não envia mensagens até que a Incoming Webhook seja configurada.
 
-Ideal para validar alterações na sua máquina local antes de enviar para o Raspberry Pi.
+1. Crie uma Slack App ou use uma app existente, habilite Incoming Webhooks e adicione uma webhook ao canal privado #tardis-backups.
+2. No Pi, rode:
 
-1. **Configurar o arquivo de hosts (`/etc/hosts`):**
-Adicione os domínios locais no seu computador:
-```text
-127.0.0.1 nextcloud.local n8n.local collabora.local
+       sudo /home/vamg/Desktop/services/Tardis-source-2026/scripts/configure-slack-webhook.sh
 
-```
+3. Cole a URL na solicitação oculta do terminal. O script envia uma mensagem de conexão e salva a URL apenas em /etc/tardis-backup.env, legível somente por root. Nunca coloque a URL no Git, em um issue ou nesta conversa.
 
+O Slack vincula cada URL de webhook a um canal e trata a URL como segredo. Consulte a documentação oficial do Slack em https://api.slack.com/messaging/webhooks. Mensagens semanais incluem sucesso ou falha, tamanho e horário da cópia.
 
-2. **Ajustes no Docker Compose para Local:**
-* Garanta que o n8n possua a variável `- N8N_SECURE_COOKIE=false` (para aceitar HTTP puro).
-* Configure os domínios confiáveis do Nextcloud para `nextcloud.local localhost 127.0.0.1`.
-* Configure o Collabora com `extra_params=--o:ssl.enable=false --o:ssl.termination=false` e `'aliasgroup1=http://.*'`.
+## Recuperação
 
+Cada cópia semanal contém tardis_db.dump (formato customizado do pg_dump), os arquivos Nextcloud e n8n, .env, os scripts de inicialização do PostgreSQL, Compose base e override real, Nginx real, status do host e bundle Git.
 
-3. **Como acessar:**
-* Nextcloud: `http://nextcloud.local`
-* n8n: `http://n8n.local`
-* Collabora: `http://collabora.local`
+Verificações automáticas de SHA-256, abertura dos arquivos tar e leitura do catálogo PostgreSQL confirmam a integridade dos artefatos. O comando server/restore.sh DIRETORIO_DO_BACKUP DIRETORIO_NOVO prepara uma extração isolada depois de conferir checksums, arquivos, dump e bundle Git; ele não troca os dados de produção nem sobe containers. Isso substitui o antigo restore.sh, que copiava um SQL para docker-entrypoint-initdb.d e não restaurava o volume ativo.
 
+Antes de restaurar:
 
+1. use uma cópia que contenha COMPLETE.txt e execute o preparo em um destino novo fora de /home/vamg/Desktop/services;
+2. crie um PostgreSQL 16 novo e confirme os usuários root e oc_admin antes de importar tardis_db.dump com pg_restore;
+3. recupere os dados Nextcloud e n8n junto da configuração correspondente, incluindo a chave de criptografia do n8n;
+4. só troque os mounts de produção depois de verificar o banco e os arquivos restaurados.
 
----
+O ensaio de restauração em ambiente isolado ainda precisa ser feito antes de declarar o procedimento plenamente comprovado. Preserve a cópia anterior do volume PostgreSQL até que o ensaio passe.
 
-### 2. Ambiente de Produção (Raspberry Pi / Com Tailscale e MagicDNS)
+## Atualizar o projeto pelo GitHub
 
-Utiliza o túnel criptografado do Tailscale para acesso seguro de dentro e de fora de casa.
+O repositório usa HTTPS e a branch remota principal é main. O Pi estava com a autenticação antiga do GitHub inválida; autentique novamente uma vez:
 
-1. **Configurar o MagicDNS:**
-Certifique-se de que o Tailscale está ativo no Raspberry Pi e obtenha o seu domínio (ex: `tardis-core01.tail1234.ts.net`).
-2. **Ajustes no Docker Compose para Produção:**
-* Atualize o arquivo `.env` com o seu `TAILSCALE_DOMAIN`.
-* Configure os subdomínios no `nginx.conf` utilizando o domínio do Tailscale (ex: `server_name nextcloud.tardis-core01.tail1234.ts.net;`).
-* No Collabora, utilize `ssl.termination=true` e aponte o alias para o Nextcloud seguro do Tailscale.
+    gh auth login --hostname github.com --git-protocol https --web
+    gh auth setup-git
 
+Depois, no clone ativo. Como o checkout de produção mantém uma branch de trabalho, atualize-a sobre `main` sem trocar para outra branch e remover os scripts do timer:
 
-3. **Como acessar:**
-* De qualquer dispositivo conectado à sua rede Tailscale:
-* `http://nextcloud.tardis-core01.tail1234.ts.net`
-* `http://n8n.tardis-core01.tail1234.ts.net`
-* `http://collabora.tardis-core01.tail1234.ts.net`
+    cd /home/vamg/Desktop/services/Tardis-source-2026
+    git status --short
+    git fetch origin
+    git rebase origin/main
 
+Comece com a árvore de trabalho limpa. Se houver conflitos, resolva-os, use `git add` nos arquivos resolvidos e rode `git rebase --continue`; para cancelar, use `git rebase --abort`.
 
+Para enviar alterações próprias, crie uma branch, revise o diff, faça commit e publique a branch:
 
+    git switch -c minha-alteracao
+    git diff
+    git add README.md scripts systemd .gitignore tardis-production.override.example.yml
+    git commit -m "Descreva a alteração"
+    git push -u origin minha-alteracao
 
+Os arquivos .env, tardis-production.override.yml, nginx.production.conf e os diretórios de dados estão excluídos do Git. A atualização do clone, sozinha, não altera os containers em execução. Antes de publicar uma nova versão na produção, faça e confira um backup, revise as imagens e os mounts, valide a configuração Compose com o .env protegido e só então aplique o deploy.
 
----
+## Monitoramento
 
-## Como Subir a Infraestrutura
-
-1. Certifique-se de ajustar as permissões da pasta do n8n (necessário para evitar erros de permissão do container):
-```bash
-sudo mkdir -p n8n_data
-sudo chown -R 1000:1000 n8n_data
-```
-
-
-2. Suba todos os serviços em segundo plano:
-```bash
-docker compose up --build -d
-```
-
-
-3. Acompanhe os logs gerais ou de um serviço específico para validar a inicialização:
-```bash
-docker compose logs -f
-```
+O diretório monitoramento_server ainda contém scripts antigos, mas não havia processo, serviço ou timer de monitoramento ativo na verificação. O timer desta documentação cobre o backup e a respectiva notificação. Configure monitoramento separado depois de definir métricas, destinatário e frequência desejados.

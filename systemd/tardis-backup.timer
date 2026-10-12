@@ -1,0 +1,11 @@
+[Unit]
+Description=Agenda o backup semanal do Tardis
+
+[Timer]
+OnCalendar=Sun *-*-* 03:00:00
+Persistent=true
+AccuracySec=1min
+Unit=tardis-backup.service
+
+[Install]
+WantedBy=timers.target

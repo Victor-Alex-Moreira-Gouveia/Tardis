@@ -1,5 +1,19 @@
+# Segredos e arquivos locais
+.env
+.env.*
+!.env.example
 *.env
+
+# Dados persistentes
 *nextcloud_data/
 *postgres_data/
-*tailscale_data/
 *n8n_data/
+*tailscale_data/
+
+# Configuração específica do Raspberry Pi
+/tardis-production.override.yml
+/nginx.production.conf
+
+# Artefatos locais
+*.log
+__pycache__/

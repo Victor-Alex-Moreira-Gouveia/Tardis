@@ -1,0 +1,48 @@
+# Modelo de override de produção. Copie para tardis-production.override.yml,
+# defina as variáveis privadas no .env de /home/vamg/Desktop/services/server
+# e confirme os destinos montados antes de executar Compose.
+services:
+  postgresSQL:
+    volumes:
+      - ${TARDIS_SERVER_DIR:?Defina TARDIS_SERVER_DIR}/postgres_data:/var/lib/postgresql:z
+      - ${TARDIS_SERVER_DIR:?Defina TARDIS_SERVER_DIR}/databases:/docker-entrypoint-initdb.d:ro,z
+      - postgres_active:/var/lib/postgresql/data
+
+  nextcloud:
+    volumes:
+      - ${TARDIS_SERVER_DIR:?Defina TARDIS_SERVER_DIR}/nextcloud_data:/var/www/html:z
+
+  nextcloud-cron:
+    volumes:
+      - ${TARDIS_SERVER_DIR:?Defina TARDIS_SERVER_DIR}/nextcloud_data:/var/www/html:z
+
+  n8n:
+    environment:
+      N8N_HOST: ${TAILSCALE_DNS_NAME:?Defina TAILSCALE_DNS_NAME}
+      N8N_PROTOCOL: https
+      N8N_PORT: "5678"
+      N8N_EDITOR_BASE_URL: https://${TAILSCALE_DNS_NAME}:8444/
+      WEBHOOK_URL: https://${TAILSCALE_DNS_NAME}:8444/
+      N8N_PROXY_HOPS: "1"
+      N8N_SECURE_COOKIE: "true"
+    ports:
+      - "127.0.0.1:5678:5678"
+    volumes:
+      - ${TARDIS_SERVER_DIR:?Defina TARDIS_SERVER_DIR}/n8n_data:/home/node/.n8n:z
+
+  collabora:
+    environment:
+      server_name: ${TAILSCALE_DNS_NAME:?Defina TAILSCALE_DNS_NAME}:8443
+      aliasgroup1: http://nextcloud_app:80
+      extra_params: --o:ssl.enable=false --o:ssl.termination=true
+    ports:
+      - "127.0.0.1:9980:9980"
+
+  nginx:
+    volumes:
+      - ${TARDIS_REPO_DIR:?Defina TARDIS_REPO_DIR}/nginx.production.conf:/etc/nginx/nginx.conf:ro
+
+volumes:
+  postgres_active:
+    external: true
+    name: ${POSTGRES_ACTIVE_VOLUME:?Defina o volume PostgreSQL ativo}
